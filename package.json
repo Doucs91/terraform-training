@@ -1,0 +1,22 @@
+{
+  "name": "mcp-fcc-banking",
+  "version": "1.0.0",
+  "description": "Banking transaction system with Terraform",
+  "scripts": {
+    "build": "tsc",
+    "build:lambdas": "./scripts/build-lambdas.sh",
+    "test": "jest",
+    "lint": "eslint . --ext .ts"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.134",
+    "@types/node": "^20.11.16",
+    "typescript": "^5.3.3",
+    "esbuild": "^0.20.0"
+  },
+  "dependencies": {
+    "@aws-sdk/client-sqs": "^3.511.0",
+    "@aws-sdk/client-s3": "^3.511.0",
+    "zod": "^3.22.4"
+  }
+}
