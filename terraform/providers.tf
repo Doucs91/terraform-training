@@ -28,6 +28,7 @@ provider "aws" {
     apigateway     = var.use_localstack ? "http://localhost:4566" : null
     cloudformation = var.use_localstack ? "http://localhost:4566" : null
     cloudwatch     = var.use_localstack ? "http://localhost:4566" : null
+    cloudwatchlogs = var.use_localstack ? "http://localhost:4566" : null
     dynamodb       = var.use_localstack ? "http://localhost:4566" : null
     ec2            = var.use_localstack ? "http://localhost:4566" : null
     iam            = var.use_localstack ? "http://localhost:4566" : null
