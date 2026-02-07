@@ -1,0 +1,75 @@
+version: '3.9'
+
+services:
+  # LocalStack - AWS Emulator
+  localstack:
+    image: localstack/localstack:latest
+    container_name: mcp-fcc-localstack
+    ports:
+      - "4566:4566"      # LocalStack endpoint
+      - "4510-4559:4510-4559"  # Services externes
+    environment:
+      - SERVICES=lambda,sqs,s3,stepfunctions,iam,logs,events,apigateway,dynamodb
+      - DEBUG=1
+      - LAMBDA_EXECUTOR=docker
+      - DOCKER_HOST=unix:///var/run/docker.sock
+      - PERSISTENCE=1
+      - DATA_DIR=/var/lib/localstack/data
+    volumes:
+      - "./localstack-data:/var/lib/localstack"
+      - "/var/run/docker.sock:/var/run/docker.sock"
+    networks:
+      - mcp-fcc-network
+
+  # Kafka pour event streaming
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.0
+    container_name: mcp-fcc-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+    networks:
+      - mcp-fcc-network
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: mcp-fcc-kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+      - "9093:9093"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,PLAINTEXT_INTERNAL://kafka:9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_INTERNAL:PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+    networks:
+      - mcp-fcc-network
+
+  # Kafka UI pour visualiser
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: mcp-fcc-kafka-ui
+    depends_on:
+      - kafka
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9093
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+    networks:
+      - mcp-fcc-network
+
+networks:
+  mcp-fcc-network:
+    driver: bridge
+
+volumes:
+  localstack-data:
