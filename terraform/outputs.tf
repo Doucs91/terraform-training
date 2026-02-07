@@ -10,6 +10,16 @@ output "test_bucket_arn" {
   value       = aws_s3_bucket.test_bucket.arn
 }
 
+output "hello_world_lambda_name" {
+  description = "Nom de la Lambda Hello World"
+  value       = module.hello_world_lambda.function_name
+}
+
+output "hello_world_lambda_arn" {
+  description = "ARN de la Lambda Hello World"
+  value       = module.hello_world_lambda.function_arn
+}
+
 output "environment" {
   description = "Environnement déployé"
   value       = var.environment

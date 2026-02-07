@@ -18,3 +18,25 @@ resource "aws_s3_bucket" "test_bucket" {
 resource "random_id" "suffix" {
   byte_length = 4
 }
+
+# Module Lambda: Hello World
+module "hello_world_lambda" {
+  source = "./modules/lambda"
+
+  function_name = "${var.project_name}-hello-world-${var.environment}"
+  description   = "Lambda de test Hello World"
+  handler       = "index.handler"
+  runtime       = "nodejs20.x"
+  timeout       = 10
+  memory_size   = 128
+
+  source_file = "../dist/lambdas/hello-world.zip"
+
+  environment_variables = {
+    ENVIRONMENT = var.environment
+    PROJECT     = var.project_name
+    LOG_LEVEL   = "INFO"
+  }
+
+  tags = var.tags
+}
