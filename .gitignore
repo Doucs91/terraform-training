@@ -1,0 +1,56 @@
+.DS_Store
+.vscode/
+.idea/
+
+# Terraform
+.terraform/
+.terraform.lock.hcl
+terraform.tfstate
+terraform.tfstate.backup
+*.tfvars.backup
+*.tfplan
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+dist/
+build/
+*.log
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Lambda packages
+*.zip
+!terraform/modules/**/*.zip
+
+# LocalStack data
+localstack-data/
+.localstack/
+
+# Testing
+coverage/
+.nyc_output/
+test-results/
+
+# OS
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Sensitive
+secrets/
+*.pem
+*.key
+*.crt
+*.pfx
