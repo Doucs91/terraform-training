@@ -105,3 +105,54 @@ resource "aws_lambda_event_source_mapping" "sqs_to_lambda" {
     module.process_transaction_lambda
   ]
 }
+
+# Lambda: Submit Transaction (API endpoint)
+module "submit_transaction_lambda" {
+  source = "./modules/lambda"
+
+  function_name = "${var.project_name}-submit-transaction-${var.environment}"
+  description   = "Receive transactions via API Gateway"
+  handler       = "index.handler"
+  runtime       = "nodejs20.x"
+  timeout       = 10
+  memory_size   = 256
+
+  source_file = "../dist/lambdas/submit-transaction.zip"
+
+  environment_variables = {
+    ENVIRONMENT  = var.environment
+    QUEUE_URL    = module.transactions_queue.queue_url
+    AWS_REGION   = var.aws_region
+    # Pour LocalStack, ne pas spécifier l'endpoint - il sera géré automatiquement
+    # SQS_ENDPOINT = var.use_localstack ? "" : ""
+  }
+
+  iam_policy_statements = [
+    {
+      Effect = "Allow"
+      Action = [
+        "sqs:SendMessage",
+        "sqs:GetQueueUrl"
+      ]
+      Resource = module.transactions_queue.queue_arn
+    }
+  ]
+
+  tags = var.tags
+}
+
+# API Gateway
+module "api_gateway" {
+  source = "./modules/api-gateway"
+
+  api_name        = "${var.project_name}-api-${var.environment}"
+  api_description = "Banking Transactions API"
+  stage_name      = var.environment
+
+  lambda_invoke_arn    = module.submit_transaction_lambda.function_invoke_arn
+  lambda_function_name = module.submit_transaction_lambda.function_name
+
+  use_localstack = var.use_localstack
+
+  tags = var.tags
+}

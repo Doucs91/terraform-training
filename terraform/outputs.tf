@@ -44,3 +44,8 @@ output "process_transaction_lambda_name" {
   description = "Nom de la Lambda de traitement"
   value       = module.process_transaction_lambda.function_name
 }
+
+output "api_endpoint" {
+  description = "URL de l'API"
+  value       = module.api_gateway.api_url
+}
