@@ -15,9 +15,21 @@ npx esbuild src/lambdas/hello-world/index.ts \
   --outfile=dist/lambdas/hello-world/index.js \
   --external:@aws-sdk/*
 
-# Créer le package ZIP
 cd dist/lambdas/hello-world
 zip -r ../hello-world.zip .
+cd -
+
+# Build process-transaction Lambda
+echo "Building process-transaction..."
+npx esbuild src/lambdas/process-transaction/index.ts \
+  --bundle \
+  --platform=node \
+  --target=node20 \
+  --outfile=dist/lambdas/process-transaction/index.js \
+  --external:@aws-sdk/*
+
+cd dist/lambdas/process-transaction
+zip -r ../process-transaction.zip .
 cd -
 
 echo "✅ Lambda functions built successfully!"

@@ -29,3 +29,18 @@ output "region" {
   description = "Région AWS utilisée"
   value       = var.aws_region
 }
+
+output "transactions_queue_url" {
+  description = "URL de la queue SQS des transactions"
+  value       = module.transactions_queue.queue_url
+}
+
+output "transactions_dlq_url" {
+  description = "URL de la Dead Letter Queue"
+  value       = module.transactions_queue.dlq_url
+}
+
+output "process_transaction_lambda_name" {
+  description = "Nom de la Lambda de traitement"
+  value       = module.process_transaction_lambda.function_name
+}
