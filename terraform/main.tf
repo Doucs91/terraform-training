@@ -58,7 +58,7 @@ module "process_transaction_lambda" {
   source = "./modules/lambda"
 
   function_name = "${var.project_name}-process-transaction-${var.environment}"
-  description   = "Process transactions from SQS queue"
+  description   = "Process transactions from SQS queue and publish to Kafka"
   handler       = "index.handler"
   runtime       = "nodejs20.x"
   timeout       = 30
@@ -67,8 +67,10 @@ module "process_transaction_lambda" {
   source_file = "../dist/lambdas/process-transaction.zip"
 
   environment_variables = {
-    ENVIRONMENT = var.environment
-    PROJECT     = var.project_name
+    ENVIRONMENT     = var.environment
+    PROJECT         = var.project_name
+    KAFKA_BROKERS   = "kafka:9093"  # Utilise le nom du service Docker
+    KAFKA_CLIENT_ID = "${var.project_name}-${var.environment}"
   }
 
   # Permissions pour lire depuis SQS

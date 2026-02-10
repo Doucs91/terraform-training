@@ -1,4 +1,5 @@
 import { SQSEvent, SQSHandler, Context } from 'aws-lambda';
+import { getKafkaService } from '../../shared/kafka.service';
 
 interface Transaction {
   transactionId: string;
@@ -7,10 +8,14 @@ interface Transaction {
   accountFrom: string;
   accountTo: string;
   timestamp: string;
+  status: string;
 }
 
+// Instance Kafka réutilisée entre invocations Lambda (Lambda container reuse)
+const kafkaService = getKafkaService();
+
 /**
- * Lambda qui traite les transactions depuis SQS
+ * Lambda qui traite les transactions depuis SQS et publie dans Kafka
  */
 export const handler: SQSHandler = async (
   event: SQSEvent,
@@ -20,6 +25,9 @@ export const handler: SQSHandler = async (
     recordCount: event.Records.length,
     requestId: context.requestId,
   });
+
+  // Connecter Kafka si pas déjà connecté
+  await kafkaService.connect();
 
   for (const record of event.Records) {
     try {
@@ -39,12 +47,29 @@ export const handler: SQSHandler = async (
       // Simuler le traitement
       await processTransaction(transaction);
 
-      console.log('Transaction processed successfully:', transaction.transactionId);
+      // Publier l'événement dans Kafka
+      const transactionEvent = {
+        ...transaction,
+        status: 'PROCESSED',
+        processedAt: new Date().toISOString(),
+        processorId: context.functionName,
+      };
+
+      await kafkaService.sendMessage('transactions-events', transactionEvent);
+
+      console.log('Transaction processed and published to Kafka:', transaction.transactionId);
 
     } catch (error) {
       console.error('Error processing transaction:', error);
-      // Le message sera renvoyé dans la queue ou DLQ selon la config
-      throw error;
+      
+      // Publier une alerte de fraude potentielle en cas d'erreur
+      await kafkaService.sendMessage('fraud-alerts', {
+        transactionId: record.messageId,
+        error: (error as Error).message,
+        timestamp: new Date().toISOString(),
+      });
+      
+      throw error; // Le message ira dans la DLQ
     }
   }
 };

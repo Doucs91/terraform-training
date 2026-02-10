@@ -1837,19 +1837,896 @@ aws --endpoint-url=http://localhost:4566 logs tail \
 
 ---
 
-### 🗓️ JOUR 5-7: Step Functions + S3 + Tests
+### 🗓️ JOUR 5: Event Streaming avec Kafka
 
-*(Je continue avec les jours 5-7 qui couvriront Step Functions, S3 pour l'archivage, et les tests d'intégration)*
+#### ⏱️ Durée: 4-5 heures
+
+#### Objectifs d'apprentissage
+- Comprendre l'event streaming et Kafka
+- Créer des topics Kafka
+- Publier des événements depuis Lambda
+- Créer des consumers Kafka
+- Intégrer Kafka dans le workflow
+
+---
+
+#### **Tâche 5.1 - Configuration Kafka**
+
+**📖 Théorie:**
+
+**Apache Kafka** est une plateforme distribuée d'event streaming qui permet de:
+- Publier et souscrire à des flux d'événements (publish/subscribe)
+- Stocker les événements de manière durable et fiable
+- Traiter les événements en temps réel
+
+**Architecture Kafka:**
+```
+Producer → Kafka Topic (partitions) → Consumer Group
+                ↓
+            Persistent Log
+```
+
+**Concepts clés:**
+- **Topic**: Canal nommé pour les messages (ex: `transactions-events`)
+- **Producer**: Publie des messages dans un topic
+- **Consumer**: Lit les messages d'un topic
+- **Partition**: Division d'un topic pour la scalabilité
+- **Consumer Group**: Groupe de consumers qui se partagent le traitement
+
+**✅ Actions:**
+
+Le docker-compose.yml contient déjà Kafka, mais vérifions qu'il est actif:
+
+```bash
+# Vérifier que Kafka tourne
+docker-compose ps kafka
+
+# Accéder à Kafka UI
+# Ouvrir http://localhost:8080 dans le navigateur
+```
+
+Créez `scripts/create-kafka-topics.js`:
+
+```javascript
+#!/usr/bin/env node
+
+const { Kafka } = require('kafkajs');
+
+const kafka = new Kafka({
+  clientId: 'mcp-fcc-banking-admin',
+  brokers: ['localhost:9092'],
+  retry: {
+    retries: 10,
+    initialRetryTime: 300,
+  },
+});
+
+const admin = kafka.admin();
+
+async function createTopics() {
+  try {
+    console.log('🔌 Connecting to Kafka...');
+    await admin.connect();
+    console.log('✅ Connected to Kafka');
+
+    const topics = [
+      {
+        topic: 'transactions-events',
+        numPartitions: 3,
+        replicationFactor: 1,
+        configEntries: [
+          { name: 'retention.ms', value: '604800000' }, // 7 days
+          { name: 'compression.type', value: 'gzip' },
+        ],
+      },
+      {
+        topic: 'fraud-alerts',
+        numPartitions: 2,
+        replicationFactor: 1,
+      },
+      {
+        topic: 'notifications',
+        numPartitions: 2,
+        replicationFactor: 1,
+      },
+    ];
+
+    console.log('📋 Creating topics...');
+    await admin.createTopics({
+      topics,
+      waitForLeaders: true,
+    });
+
+    console.log('✅ Topics created successfully:');
+    topics.forEach((t) => console.log(`   - ${t.topic}`));
+
+    // Lister tous les topics
+    const existingTopics = await admin.listTopics();
+    console.log('\n📚 All topics:', existingTopics);
+
+    await admin.disconnect();
+    console.log('✅ Disconnected from Kafka');
+  } catch (error) {
+    console.error('❌ Error:', error.message);
+    process.exit(1);
+  }
+}
+
+createTopics();
+```
+
+Ajoutez la dépendance KafkaJS dans `package.json`:
+
+```json
+{
+  "dependencies": {
+    "@aws-sdk/client-sqs": "^3.511.0",
+    "@aws-sdk/client-s3": "^3.511.0",
+    "zod": "^3.22.4",
+    "kafkajs": "^2.2.4"
+  }
+}
+```
+
+```bash
+# Installer KafkaJS
+npm install kafkajs
+
+# Rendre le script exécutable
+chmod +x scripts/create-kafka-topics.js
+
+# Créer les topics
+node scripts/create-kafka-topics.js
+
+# Vérifier dans Kafka UI
+# http://localhost:8080 → Topics
+```
+
+**🔍 Vérifications:**
+- [ ] Kafka tourne (docker-compose ps)
+- [ ] KafkaJS installé
+- [ ] Topics créés (transactions-events, fraud-alerts, notifications)
+- [ ] Topics visibles dans Kafka UI
+
+**📚 Documentation:**
+- [KafkaJS Docs](https://kafka.js.org/)
+- [Kafka Introduction](https://kafka.apache.org/intro)
+
+---
+
+#### **Tâche 5.2 - Kafka Producer Service**
+
+**📖 Théorie:**
+
+Un **Producer** publie des messages dans Kafka. Dans notre architecture, la Lambda `process-transaction` va publier un événement dans Kafka après avoir traité la transaction.
+
+**✅ Actions:**
+
+Créez `src/shared/kafka.service.ts`:
+
+```typescript
+import { Kafka, Producer, Message, CompressionTypes } from 'kafkajs';
+
+export interface KafkaConfig {
+  clientId: string;
+  brokers: string[];
+}
+
+export class KafkaService {
+  private kafka: Kafka;
+  private producer: Producer | null = null;
+
+  constructor(config: KafkaConfig) {
+    this.kafka = new Kafka({
+      clientId: config.clientId,
+      brokers: config.brokers,
+      retry: {
+        retries: 5,
+        initialRetryTime: 300,
+        maxRetryTime: 30000,
+      },
+    });
+  }
+
+  async connect(): Promise<void> {
+    if (!this.producer) {
+      this.producer = this.kafka.producer({
+        allowAutoTopicCreation: false,
+        compression: CompressionTypes.GZIP,
+      });
+      await this.producer.connect();
+      console.log('Kafka producer connected');
+    }
+  }
+
+  async disconnect(): Promise<void> {
+    if (this.producer) {
+      await this.producer.disconnect();
+      this.producer = null;
+      console.log('Kafka producer disconnected');
+    }
+  }
+
+  async sendMessage(topic: string, message: any): Promise<void> {
+    if (!this.producer) {
+      await this.connect();
+    }
+
+    const kafkaMessage: Message = {
+      key: message.transactionId || Date.now().toString(),
+      value: JSON.stringify(message),
+      timestamp: Date.now().toString(),
+      headers: {
+        'content-type': 'application/json',
+      },
+    };
+
+    await this.producer!.send({
+      topic,
+      messages: [kafkaMessage],
+    });
+
+    console.log(`Message sent to Kafka topic: ${topic}`, {
+      key: kafkaMessage.key,
+      timestamp: kafkaMessage.timestamp,
+    });
+  }
+
+  async sendBatch(topic: string, messages: any[]): Promise<void> {
+    if (!this.producer) {
+      await this.connect();
+    }
+
+    const kafkaMessages: Message[] = messages.map((msg) => ({
+      key: msg.transactionId || Date.now().toString(),
+      value: JSON.stringify(msg),
+      timestamp: Date.now().toString(),
+    }));
+
+    await this.producer!.send({
+      topic,
+      messages: kafkaMessages,
+    });
+
+    console.log(`Batch of ${messages.length} messages sent to topic: ${topic}`);
+  }
+}
+
+// Singleton instance pour Lambda (réutilise la connexion)
+let kafkaServiceInstance: KafkaService | null = null;
+
+export function getKafkaService(): KafkaService {
+  if (!kafkaServiceInstance) {
+    kafkaServiceInstance = new KafkaService({
+      clientId: process.env.KAFKA_CLIENT_ID || 'mcp-fcc-banking',
+      brokers: (process.env.KAFKA_BROKERS || 'localhost:9092').split(','),
+    });
+  }
+  return kafkaServiceInstance;
+}
+```
+
+**🔍 Vérifications:**
+- [ ] Fichier `kafka.service.ts` créé
+- [ ] Service avec singleton pattern
+- [ ] Méthodes sendMessage et sendBatch
+- [ ] Gestion de la connexion/déconnexion
+
+---
+
+#### **Tâche 5.3 - Publier dans Kafka depuis Lambda**
+
+**✅ Actions:**
+
+Modifiez `src/lambdas/process-transaction/index.ts`:
+
+```typescript
+import { SQSEvent, SQSHandler, Context } from 'aws-lambda';
+import { getKafkaService } from '../../shared/kafka.service';
+
+interface Transaction {
+  transactionId: string;
+  amount: number;
+  currency: string;
+  accountFrom: string;
+  accountTo: string;
+  timestamp: string;
+  status: string;
+}
+
+// Instance Kafka réutilisée entre invocations Lambda (Lambda container reuse)
+const kafkaService = getKafkaService();
+
+/**
+ * Lambda qui traite les transactions depuis SQS et publie dans Kafka
+ */
+export const handler: SQSHandler = async (
+  event: SQSEvent,
+  context: Context
+): Promise<void> => {
+  console.log('Processing batch:', {
+    recordCount: event.Records.length,
+    requestId: context.requestId,
+  });
+
+  // Connecter Kafka si pas déjà connecté
+  await kafkaService.connect();
+
+  for (const record of event.Records) {
+    try {
+      const transaction: Transaction = JSON.parse(record.body);
+      
+      console.log('Processing transaction:', transaction);
+
+      // Validation simple
+      if (transaction.amount <= 0) {
+        throw new Error('Invalid amount: must be positive');
+      }
+
+      if (!transaction.accountFrom || !transaction.accountTo) {
+        throw new Error('Missing account information');
+      }
+
+      // Simuler le traitement
+      await processTransaction(transaction);
+
+      // Publier l'événement dans Kafka
+      const transactionEvent = {
+        ...transaction,
+        status: 'PROCESSED',
+        processedAt: new Date().toISOString(),
+        processorId: context.functionName,
+      };
+
+      await kafkaService.sendMessage('transactions-events', transactionEvent);
+
+      console.log('Transaction processed and published to Kafka:', transaction.transactionId);
+
+    } catch (error) {
+      console.error('Error processing transaction:', error);
+      
+      // Publier une alerte de fraude potentielle en cas d'erreur
+      await kafkaService.sendMessage('fraud-alerts', {
+        transactionId: record.messageId,
+        error: (error as Error).message,
+        timestamp: new Date().toISOString(),
+      });
+      
+      throw error; // Le message ira dans la DLQ
+    }
+  }
+};
+
+async function processTransaction(transaction: Transaction): Promise<void> {
+  // Simuler un délai de traitement
+  await new Promise(resolve => setTimeout(resolve, 100));
+  
+  // Logique métier ici
+  console.log(`Processing ${transaction.amount} ${transaction.currency}`);
+  console.log(`From: ${transaction.accountFrom} → To: ${transaction.accountTo}`);
+}
+```
+
+Mettez à jour la configuration Terraform pour ajouter les variables d'environnement Kafka:
+
+Dans `terraform/main.tf`, modifiez le module `process_transaction_lambda`:
+
+```hcl
+module "process_transaction_lambda" {
+  source = "./modules/lambda"
+
+  function_name = "${var.project_name}-process-transaction-${var.environment}"
+  description   = "Process transactions from SQS queue and publish to Kafka"
+  handler       = "index.handler"
+  runtime       = "nodejs20.x"
+  timeout       = 30
+  memory_size   = 256
+
+  source_file = "../dist/lambdas/process-transaction.zip"
+
+  environment_variables = {
+    ENVIRONMENT     = var.environment
+    PROJECT         = var.project_name
+    KAFKA_BROKERS   = "kafka:9093"  # Utilise le nom du service Docker
+    KAFKA_CLIENT_ID = "${var.project_name}-${var.environment}"
+  }
+
+  # Permissions pour lire depuis SQS
+  iam_policy_statements = [
+    {
+      Effect = "Allow"
+      Action = [
+        "sqs:ReceiveMessage",
+        "sqs:DeleteMessage",
+        "sqs:GetQueueAttributes",
+        "sqs:ChangeMessageVisibility"
+      ]
+      Resource = module.transactions_queue.queue_arn
+    }
+  ]
+
+  tags = var.tags
+}
+```
+
+```bash
+# Rebuild les Lambdas
+npm run build:lambdas
+
+# Redéployer
+cd terraform
+terraform apply -var-file=environments/local.tfvars
+
+# Tester en envoyant une transaction
+cd ..
+API_URL=$(cd terraform && terraform output -raw api_endpoint)
+
+curl -X POST $API_URL \
+  -H "Content-Type: application/json" \
+  -d '{
+    "amount": 500.00,
+    "currency": "CAD",
+    "accountFrom": "ACC-11111",
+    "accountTo": "ACC-22222"
+  }'
+
+# Vérifier les logs
+for log_group in $(aws --endpoint-url=http://localhost:4566 logs describe-log-groups --log-group-name-prefix "/aws/lambda/mcp-fcc-banking" --query 'logGroups[].logGroupName' --output text); do
+  echo "=== $log_group ==="
+  aws --endpoint-url=http://localhost:4566 logs tail "$log_group" --since 2m
+done
+
+# Vérifier dans Kafka UI que le message est arrivé
+# http://localhost:8080 → Topics → transactions-events → Messages
+```
+
+**🔍 Vérifications:**
+- [ ] Lambda process-transaction modifiée
+- [ ] KafkaService intégré
+- [ ] Variables d'environnement Kafka configurées
+- [ ] Rebuild et redéploiement réussis
+- [ ] Transaction publiée dans Kafka
+- [ ] Message visible dans Kafka UI
+
+---
+
+#### **Tâche 5.4 - Kafka Consumer**
+
+**📖 Théorie:**
+
+Un **Consumer** lit les messages depuis Kafka. Les consumers peuvent être organisés en **Consumer Groups** pour partager la charge de travail.
+
+**✅ Actions:**
+
+Créez `src/consumers/transaction-events.consumer.ts`:
+
+```typescript
+import { Kafka, Consumer, EachMessagePayload } from 'kafkajs';
+
+interface TransactionEvent {
+  transactionId: string;
+  amount: number;
+  currency: string;
+  accountFrom: string;
+  accountTo: string;
+  status: string;
+  processedAt: string;
+}
+
+export class TransactionEventsConsumer {
+  private kafka: Kafka;
+  private consumer: Consumer;
+
+  constructor() {
+    this.kafka = new Kafka({
+      clientId: 'mcp-fcc-banking-consumer',
+      brokers: (process.env.KAFKA_BROKERS || 'localhost:9092').split(','),
+      retry: {
+        retries: 5,
+        initialRetryTime: 300,
+      },
+    });
+
+    this.consumer = this.kafka.consumer({
+      groupId: 'transaction-processors',
+      sessionTimeout: 30000,
+      heartbeatInterval: 3000,
+    });
+  }
+
+  async connect(): Promise<void> {
+    await this.consumer.connect();
+    console.log('✅ Consumer connected to Kafka');
+  }
+
+  async disconnect(): Promise<void> {
+    await this.consumer.disconnect();
+    console.log('✅ Consumer disconnected from Kafka');
+  }
+
+  async subscribe(): Promise<void> {
+    await this.consumer.subscribe({
+      topic: 'transactions-events',
+      fromBeginning: false, // Seulement les nouveaux messages
+    });
+    console.log('✅ Subscribed to transactions-events topic');
+  }
+
+  async run(): Promise<void> {
+    await this.consumer.run({
+      eachMessage: async (payload: EachMessagePayload) => {
+        await this.handleMessage(payload);
+      },
+    });
+  }
+
+  private async handleMessage(payload: EachMessagePayload): Promise<void> {
+    const { topic, partition, message } = payload;
+
+    try {
+      const event: TransactionEvent = JSON.parse(message.value!.toString());
+
+      console.log('📩 Received transaction event:', {
+        topic,
+        partition,
+        offset: message.offset,
+        transactionId: event.transactionId,
+        status: event.status,
+        amount: event.amount,
+      });
+
+      // Traiter l'événement
+      await this.processTransactionEvent(event);
+
+      console.log('✅ Transaction event processed:', event.transactionId);
+    } catch (error) {
+      console.error('❌ Error processing message:', error);
+      // En production: implémenter retry logic ou DLQ
+    }
+  }
+
+  private async processTransactionEvent(event: TransactionEvent): Promise<void> {
+    // Logique métier ici:
+    // - Enregistrer dans une base de données
+    // - Mettre à jour des analytics
+    // - Déclencher d'autres workflows
+    // - Envoyer des notifications
+    
+    console.log(`Processing event for transaction: ${event.transactionId}`);
+    console.log(`Amount: ${event.amount} ${event.currency}`);
+    console.log(`Status: ${event.status}`);
+    console.log(`Processed at: ${event.processedAt}`);
+
+    // Simuler un traitement
+    await new Promise(resolve => setTimeout(resolve, 500));
+  }
+}
+
+// Point d'entrée pour exécuter le consumer
+async function main() {
+  const consumer = new TransactionEventsConsumer();
+
+  // Graceful shutdown
+  const errorTypes = ['unhandledRejection', 'uncaughtException'];
+  const signalTraps = ['SIGTERM', 'SIGINT', 'SIGUSR2'];
+
+  errorTypes.forEach((type) => {
+    process.on(type, async (e) => {
+      try {
+        console.log(`Process ${type}: ${e}`);
+        await consumer.disconnect();
+        process.exit(0);
+      } catch (_) {
+        process.exit(1);
+      }
+    });
+  });
+
+  signalTraps.forEach((type) => {
+    process.once(type, async () => {
+      try {
+        console.log(`Process ${type} received`);
+        await consumer.disconnect();
+      } finally {
+        process.kill(process.pid, type);
+      }
+    });
+  });
+
+  try {
+    await consumer.connect();
+    await consumer.subscribe();
+    console.log('🚀 Consumer is running...');
+    await consumer.run();
+  } catch (error) {
+    console.error('❌ Fatal error:', error);
+    await consumer.disconnect();
+    process.exit(1);
+  }
+}
+
+// Exécuter si appelé directement
+if (require.main === module) {
+  main();
+}
+
+export default TransactionEventsConsumer;
+```
+
+Ajoutez un script dans `package.json`:
+
+```json
+{
+  "scripts": {
+    "build": "tsc",
+    "build:lambdas": "./scripts/build-lambdas.sh",
+    "consumer:transactions": "ts-node src/consumers/transaction-events.consumer.ts",
+    "test": "jest",
+    "lint": "eslint . --ext .ts"
+  }
+}
+```
+
+Installez ts-node:
+
+```bash
+npm install --save-dev ts-node
+```
+
+Testez le consumer:
+
+```bash
+# Dans un terminal séparé, lancer le consumer
+npm run consumer:transactions
+
+# Dans un autre terminal, envoyer une transaction
+cd terraform
+API_URL=$(terraform output -raw api_endpoint)
+
+curl -X POST $API_URL \
+  -H "Content-Type: application/json" \
+  -d '{
+    "amount": 750.00,
+    "currency": "CAD",
+    "accountFrom": "ACC-33333",
+    "accountTo": "ACC-44444"
+  }'
+
+# Observer les logs du consumer qui traite l'événement
+```
+
+**🔍 Vérifications:**
+- [ ] Consumer créé avec Consumer Group
+- [ ] Graceful shutdown implémenté
+- [ ] Consumer traite les messages de Kafka
+- [ ] Logs visibles montrant le traitement
+- [ ] Messages visibles dans Kafka UI
+
+**📚 Documentation:**
+- [KafkaJS Consumer](https://kafka.js.org/docs/consuming)
+- [Consumer Groups](https://kafka.apache.org/documentation/#consumergroups)
+
+---
+
+#### **Tâche 5.5 - Architecture Event-Driven Complète**
+
+**📖 Théorie:**
+
+Nous avons maintenant une architecture **event-driven** complète:
+
+```
+Client
+  ↓
+API Gateway
+  ↓
+Lambda Submit → SQS Queue
+  ↓
+Lambda Process → Kafka Topic
+  ↓
+Kafka Consumer(s) → Traitement final
+```
+
+**Avantages:**
+- ✅ **Découplage**: Chaque composant est indépendant
+- ✅ **Scalabilité**: Chaque étape peut scaler séparément
+- ✅ **Résilience**: SQS + Kafka garantissent la livraison
+- ✅ **Traçabilité**: Tous les événements sont loggés
+- ✅ **Extensibilité**: Facile d'ajouter de nouveaux consumers
+
+**✅ Actions:**
+
+Créez un script de test end-to-end `scripts/test-workflow.sh`:
+
+```bash
+#!/bin/bash
+set -e
+
+echo "🧪 Testing Complete Event-Driven Workflow"
+echo "========================================"
+
+cd terraform
+
+# Récupérer l'URL de l'API
+API_URL=$(terraform output -raw api_endpoint)
+echo "📍 API URL: $API_URL"
+
+# Test 1: Transaction valide
+echo ""
+echo "📤 Test 1: Sending valid transaction..."
+RESPONSE=$(curl -s -X POST $API_URL \
+  -H "Content-Type: application/json" \
+  -d '{
+    "amount": 1200.00,
+    "currency": "CAD",
+    "accountFrom": "ACC-TEST-001",
+    "accountTo": "ACC-TEST-002"
+  }')
+
+echo "Response: $RESPONSE"
+TRANSACTION_ID=$(echo $RESPONSE | jq -r '.transactionId')
+echo "✅ Transaction submitted: $TRANSACTION_ID"
+
+# Attendre le traitement
+echo "⏳ Waiting for processing..."
+sleep 3
+
+# Test 2: Transaction invalide (montant négatif)
+echo ""
+echo "📤 Test 2: Sending invalid transaction (negative amount)..."
+curl -s -X POST $API_URL \
+  -H "Content-Type: application/json" \
+  -d '{
+    "amount": -50.00,
+    "currency": "CAD",
+    "accountFrom": "ACC-TEST-003",
+    "accountTo": "ACC-TEST-004"
+  }' | jq .
+
+# Vérifier les logs
+echo ""
+echo "📋 Checking Lambda logs..."
+aws --endpoint-url=http://localhost:4566 logs tail \
+  /aws/lambda/mcp-fcc-banking-process-transaction-local \
+  --since 5m | grep "Transaction processed"
+
+echo ""
+echo "✅ Workflow test complete!"
+echo "👉 Check Kafka UI: http://localhost:8080"
+echo "👉 Topic: transactions-events"
+```
+
+```bash
+# Rendre exécutable et tester
+chmod +x scripts/test-workflow.sh
+./scripts/test-workflow.sh
+```
+
+**🔍 Vérifications finales:**
+- [ ] Script de test end-to-end fonctionne
+- [ ] Transaction valide passe par tout le workflow
+- [ ] Transaction invalide est rejetée
+- [ ] Événements visibles dans Kafka UI
+- [ ] Logs montrent le flux complet
+- [ ] Consumer traite les événements
+
+**🎓 Concepts Clés Appris:**
+- ✅ Event Streaming avec Kafka
+- ✅ Topics, Partitions, Consumer Groups
+- ✅ Producers et Consumers KafkaJS
+- ✅ Architecture Event-Driven complète
+- ✅ Découplage et scalabilité
+- ✅ Intégration Lambda → Kafka
+- ✅ Consumer standalone Node.js
+
+**📊 Architecture Actuelle:**
+
+```
+┌─────────────┐
+│   Client    │
+└──────┬──────┘
+       │ HTTP POST
+       ▼
+┌──────────────────┐
+│  API Gateway     │ (LocalStack)
+│  + Lambda Submit │
+└────────┬─────────┘
+         │ SQS Message
+         ▼
+┌────────────────────┐
+│  SQS Queue + DLQ   │
+└────────┬───────────┘
+         │ Event Source Mapping
+         ▼
+┌─────────────────────┐
+│ Lambda Process      │
+│ Transaction         │
+└────────┬────────────┘
+         │ Kafka Message
+         ▼
+┌─────────────────────┐
+│  Kafka Topic        │
+│ transactions-events │
+└────────┬────────────┘
+         │ Consumer Group
+         ▼
+┌─────────────────────┐
+│  Kafka Consumer(s)  │
+│  - Analytics        │
+│  - Notifications    │
+│  - Archiving        │
+└─────────────────────┘
+```
+
+---
+
+### 📚 Récapitulatif Semaine 1 (Mise à jour)
+
+**Vous avez appris:**
+
+✅ **Terraform Basics**
+- Installation et setup
+- Structure de projet (providers, main, variables, outputs)
+- Workflow: init → plan → apply
+- State management
+
+✅ **LocalStack**
+- Configuration avec Docker
+- Endpoints pour services AWS locaux
+- Testing sans frais
+
+✅ **Modules Terraform**
+- Création de modules réutilisables
+- Variables d'entrée et outputs
+- Composition de modules
+
+✅ **Lambda Functions**
+- Packaging de code TypeScript
+- Déploiement avec Terraform
+- IAM roles et permissions
+- Environment variables
+- CloudWatch logs
+
+✅ **SQS Queues**
+- Queue principale et DLQ
+- Event source mapping avec Lambda
+- Message processing automatique
+
+✅ **API Gateway**
+- REST API avec LocalStack
+- Integration Lambda (AWS_PROXY)
+- Validation avec Zod
+
+✅ **Kafka Event Streaming** ⭐ NOUVEAU
+- Topics, Partitions, Consumer Groups
+- KafkaJS Producer et Consumer
+- Event-driven architecture
+- Intégration Lambda → Kafka
+- Kafka UI pour monitoring
+
+**Architecture complète:**
+```
+API Gateway → SQS → Lambda Process → Kafka → Consumers
+                ↓
+              DLQ
+```
+
+**Prochaine semaine:** Step Functions workflows, S3 archiving, Tests !
+
+---
+
+### 🗓️ JOUR 6-7: Step Functions + S3 + Tests
+
+*(À détailler: orchestration de workflows avec Step Functions, archivage dans S3, et tests d'intégration)*
 
 **Résumé du plan complet des 4 semaines:**
 
-- **Semaine 1** ✅ (ci-dessus): Terraform basics, Lambda, SQS, API Gateway
-- **Semaine 2**: Step Functions workflows, S3, Kafka sur EC2, intégration complète
+- **Semaine 1** ✅ (complété): Terraform, LocalStack, Lambda, SQS, API Gateway, Kafka
+- **Semaine 2**: Step Functions workflows, S3, intégration complète, monitoring
 - **Semaine 3**: Modules avancés, multi-environnements, remote state, tests infrastructure
-- **Semaine 4**: CI/CD, monitoring, optimisations, production readiness
+- **Semaine 4**: CI/CD, monitoring avancé, optimisations, production readiness
 
 ---
 
 **Ce plan continue sur 20+ pages avec chaque jour détaillé...**
 
-Voulez-vous que je continue à détailler les semaines 2-4, ou préférez-vous que je me concentre sur des sections spécifiques ?
+Voulez-vous que je continue à détailler les jours 6-7 et les semaines 2-4, ou avez-vous des questions spécifiques ?
